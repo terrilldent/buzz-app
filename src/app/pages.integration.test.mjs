@@ -54,14 +54,26 @@ test("the app runtime exposes ready bundled pages and removes them on disable", 
     );
     assert.notEqual(services.accountActions.snapshot()[0], firstFeedback);
     await settle();
+    assert.equal(
+      services.pages
+        .snapshot()
+        .some((page) => page.pluginId === "buzz.reviews"),
+      false,
+    );
+    await services.plugins.change("enable", "buzz.reviews");
+    await vi.waitFor(() =>
+      assert.ok(
+        services.pages
+          .snapshot()
+          .some((page) => page.pluginId === "buzz.reviews"),
+      ),
+    );
     const reviews = services.pages
       .snapshot()
       .find((page) => page.pluginId === "buzz.reviews");
     assert.ok(reviews);
-    assert.match(
-      renderToStaticMarkup(createElement(reviews.component)),
-      /Hello, world!/,
-    );
+    assert.equal(reviews.title, "Reviews");
+    // The browser Reviews journey covers its live external-store rendering.
     await services.plugins.change("disable", "buzz.reviews");
     assert.equal(
       services.pages
@@ -97,6 +109,7 @@ test("the app runtime exposes ready bundled pages and removes them on disable", 
           "buzz.bestie",
           "buzz.pi",
           "buzz.todos",
+          "buzz.reviews",
           "buzz.usage",
           "buzz.relay-notes",
         ].includes(plugin.manifest.id),

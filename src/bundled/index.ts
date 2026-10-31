@@ -164,7 +164,7 @@ export const bundledPlugins: readonly BundledPlugin[] = [
   {
     manifest: { ...reviewsManifest, apiVersion: 1 },
     module: reviews,
-    enabledByDefault: true,
+    enabledByDefault: false,
   },
   {
     manifest: { ...remindersManifest, apiVersion: 1 },

@@ -89,8 +89,13 @@ the interface unless an available tool actually supports that action.
 
 - Plugins can add features. **Settings → Plugins → Manage plugins** controls
   them. Do not assume a particular optional plugin is on.
-- **Reviews** in the sidebar currently opens a hello-world page. It has no GitHub
-  connection, saved review data, or review actions yet.
+- **Reviews** is optional and starts disabled. Enable it in Settings → Plugins,
+  then open Reviews in the sidebar. On desktop it uses your GitHub CLI sign-in
+  (`gh auth login`) to list open PRs requesting your review, including team requests.
+  It syncs on activation, about every five minutes while enabled and Buzz is open,
+  or with Refresh reviews. Rows open GitHub. The account-scoped IndexedDB cache
+  stays on this device; failed syncs preserve saved rows and show an error. It does
+  not run or submit reviews, and browser mode cannot sync GitHub.
 - **Attention**, when available, lets agents use Interests, watches, and timers
   to follow work. Its tab in an agent's profile shows what that agent is watching
   and whether Attention is on for this device. A mention can still wake an agent
