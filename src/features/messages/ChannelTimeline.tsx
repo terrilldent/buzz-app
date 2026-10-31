@@ -20,6 +20,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   Fragment,
   type KeyboardEvent,
 } from "react";
@@ -38,6 +39,7 @@ import type { PageNavigation } from "../navigation/service";
 import { messageViewKey } from "./view-key";
 import { useKnownAgentPubkeys } from "../agents/use-known";
 import { JumpToLatestButton } from "./JumpToLatestButton";
+import { useMessageVisit } from "./MessageManagement";
 
 // Native upward scrolling can start on a focused message link or button.
 // Inner scrollports own the key while they can move. At their top boundary,
@@ -82,6 +84,23 @@ type ReadingPosition = {
   bottom: boolean;
   anchor?: { id: string; y: number };
 };
+type NewMessageBoundary = {
+  token: object;
+  session: RelaySession;
+  scope: string;
+  channelId: string;
+  captured: boolean;
+  messageId?: string;
+};
+type NewMessageBoundaryBaseline = {
+  token: object;
+  session: RelaySession;
+  scope: string;
+  channelId: string;
+  revision?: number;
+  latestMessageId?: string;
+};
+const unknownUnreadSync = Object.freeze({ completeness: "unknown" as const });
 function positionAt(
   element: HTMLElement,
   restoredAnchor?: string,
@@ -234,6 +253,167 @@ function Timeline({
     ],
   );
   const rows = useMemo(() => membershipRows(visibleRows), [visibleRows]);
+  const messageVisit = useMessageVisit(queries, channelId);
+  const ownsMessageVisit = messageVisit !== undefined && messageVisit !== null;
+  const [timelineVisit] = useState<object>(() => ({}));
+  const visitToken = messageVisit?.token ?? timelineVisit;
+  const [newMessageBoundary, setNewMessageBoundary] =
+    useState<NewMessageBoundary>(() => ({
+      token: visitToken,
+      session: queries,
+      scope,
+      channelId,
+      captured: false,
+    }));
+  const boundaryMatchesVisit =
+    newMessageBoundary.token === visitToken &&
+    newMessageBoundary.session === queries &&
+    newMessageBoundary.scope === scope &&
+    newMessageBoundary.channelId === channelId;
+  const boundaryPending = !boundaryMatchesVisit || !newMessageBoundary.captured;
+  const unreadTarget = useMemo(
+    () => ({ kind: "channel" as const, channelId }),
+    [channelId],
+  );
+  const subscribeUnread = useCallback(
+    (listener: () => void) =>
+      ownsMessageVisit && boundaryPending
+        ? queries.unread.subscribe(unreadTarget, listener)
+        : () => {},
+    [boundaryPending, ownsMessageVisit, queries.unread, unreadTarget],
+  );
+  const getUnreadSnapshot = useCallback(
+    () =>
+      ownsMessageVisit ? queries.unread.snapshot(unreadTarget) : undefined,
+    [ownsMessageVisit, queries.unread, unreadTarget],
+  );
+  const unreadSnapshot = useSyncExternalStore(
+    subscribeUnread,
+    getUnreadSnapshot,
+    getUnreadSnapshot,
+  );
+  const [, setUnreadEvidenceRevision] = useState(0);
+  const subscribeUnreadSync = useCallback(
+    (listener: () => void) =>
+      ownsMessageVisit && boundaryPending
+        ? queries.unread.subscribeSync(() => {
+            listener();
+            setUnreadEvidenceRevision((revision) => revision + 1);
+          })
+        : () => {},
+    [boundaryPending, ownsMessageVisit, queries.unread],
+  );
+  const getUnreadSync = useCallback(
+    () => (ownsMessageVisit ? queries.unread.sync() : unknownUnreadSync),
+    [ownsMessageVisit, queries.unread],
+  );
+  const unreadSync = useSyncExternalStore(
+    subscribeUnreadSync,
+    getUnreadSync,
+    getUnreadSync,
+  );
+  const boundaryBaseline = useRef<NewMessageBoundaryBaseline | undefined>(
+    undefined,
+  );
+  if (
+    !boundaryBaseline.current ||
+    boundaryBaseline.current.token !== visitToken ||
+    boundaryBaseline.current.session !== queries ||
+    boundaryBaseline.current.scope !== scope ||
+    boundaryBaseline.current.channelId !== channelId
+  )
+    boundaryBaseline.current = {
+      token: visitToken,
+      session: queries,
+      scope,
+      channelId,
+      ...(ownsMessageVisit && messageVisit?.active
+        ? { revision: queries.unread.revision() }
+        : {}),
+      ...(unreadSnapshot?.latestMessage
+        ? { latestMessageId: unreadSnapshot.latestMessage.id }
+        : {}),
+    };
+  const baseline = boundaryBaseline.current;
+  // An unread count without a loaded, classifiable row is not an exact boundary.
+  const noUnreadEvidence =
+    unreadSnapshot?.observedCount === 0 && unreadSnapshot?.attentionCount === 0;
+  const boundaryCandidate = (() => {
+    if (!boundaryPending || !ownsMessageVisit || messageVisit?.active !== true)
+      return { ready: false };
+    if (
+      baseline.revision !== undefined &&
+      queries.unread.revision() !== baseline.revision
+    )
+      return { ready: true };
+    if (
+      window.status !== "ready" ||
+      window.freshness !== "verified" ||
+      window.refreshing ||
+      window.loadingOlder ||
+      window.hasMore ||
+      window.historyLimited ||
+      unreadSync.completeness !== "snapshot"
+    )
+      return { ready: false };
+    if (
+      unreadSnapshot?.coverage !== "observed" ||
+      unreadSnapshot?.freshness !== "observed"
+    )
+      return { ready: false };
+    if (!rows.length) return { ready: noUnreadEvidence };
+    const entryLatestMessageId = baseline.latestMessageId;
+    if (!entryLatestMessageId) return { ready: true };
+    const boundaryEnd =
+      unreadSnapshot.latestMessage?.id === entryLatestMessageId
+        ? rows.length - 1
+        : rows.findIndex((row) => row.id === entryLatestMessageId);
+    if (boundaryEnd < 0) return { ready: true };
+    for (const row of rows.slice(0, boundaryEnd + 1)) {
+      if (row.membership || row.huddle || row.audience === "agents") continue;
+      if (row.authorId === queries.viewer) continue;
+      const attention = queries.unread.attention(channelId, row.id);
+      if (attention.status === "unknown" || attention.pending)
+        return { ready: false };
+      // Ineligible means no attention category, not that an incoming row is read.
+      if (attention.forced) return { ready: true, messageId: row.id };
+      if (attention.unread) return { ready: true, messageId: row.id };
+    }
+    return { ready: true };
+  })();
+  if (!boundaryMatchesVisit)
+    setNewMessageBoundary({
+      token: visitToken,
+      session: queries,
+      scope,
+      channelId,
+      captured: false,
+    });
+  else if (
+    !newMessageBoundary.captured &&
+    boundaryCandidate.ready &&
+    messageVisit?.active === true &&
+    messageVisit?.ready === true &&
+    messageVisit?.failed === false
+  )
+    setNewMessageBoundary({
+      token: visitToken,
+      session: queries,
+      scope,
+      channelId,
+      captured: true,
+      ...(boundaryCandidate.messageId
+        ? { messageId: boundaryCandidate.messageId }
+        : {}),
+    });
+  const newMessageBoundaryId =
+    boundaryMatchesVisit &&
+    newMessageBoundary.captured &&
+    messageVisit?.active === true &&
+    messageVisit?.ready === true &&
+    messageVisit?.failed === false
+      ? newMessageBoundary.messageId
+      : undefined;
   const [expandedActivity, setExpandedActivity] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
@@ -345,6 +525,7 @@ function Timeline({
   const heldReader = useRef<
     { id: string; y: number; intent: number } | undefined
   >(undefined);
+  const previousBoundaryId = useRef<string | undefined>(undefined);
   const upwardGesture = useRef<false | "candidate" | "moving">(false);
   const gestureFrame = useRef<number | undefined>(undefined);
   const touchY = useRef<number | undefined>(undefined);
@@ -591,6 +772,8 @@ function Timeline({
   // reader's latest row through those measurements, until reader input that
   // follows them ends.
   useLayoutEffect(() => {
+    const boundaryChanged = previousBoundaryId.current !== newMessageBoundaryId;
+    previousBoundaryId.current = newMessageBoundaryId;
     const element = scroller.current;
     const list = element?.querySelector("ol");
     const index = rows.findIndex((row) => row.id === reader.current.id);
@@ -610,6 +793,7 @@ function Timeline({
     if (
       !id ||
       (!moved &&
+        !boundaryChanged &&
         rows.length <= edges.current.order.length &&
         !(
           heldReader.current?.id === id &&
@@ -619,7 +803,20 @@ function Timeline({
       return;
     // New rows can leave the initial offset unchanged. Hold through their
     // measurements, but leave ordinary prepend follow-up renders to Virtua.
-    correctScrollTop(element, moved);
+    const row = element.querySelector<HTMLElement>(
+      `[data-message-id="${CSS.escape(id)}"]`,
+    );
+    // A divider changes the anchor's inset inside its virtual item before
+    // Virtua commits the new item height. Hold the same message through both.
+    const delta =
+      boundaryChanged && row
+        ? row.getBoundingClientRect().top -
+          element.getBoundingClientRect().top -
+          reader.current.y
+        : moved;
+    // WebKit truncates fractional scrollTop writes; use the nearest pixel
+    // when a caption's fractional line height changes the message inset.
+    correctScrollTop(element, boundaryChanged ? Math.round(delta) : delta);
     // The row's offset from the viewport, as last placed by the reader.
     // A live append must not choose a newly inserted row while the older
     // page is still measuring; keep the reader's original row and offset.
@@ -672,7 +869,7 @@ function Timeline({
         // Follow the same item's delta without mixing its inner DOM offset in.
         if (row === undefined && next !== undefined && logical !== undefined)
           delta = next - logical;
-        correctScrollTop(element, delta);
+        correctScrollTop(element, boundaryChanged ? Math.round(delta) : delta);
       }
       logical = logicalTop();
     });
@@ -701,7 +898,7 @@ function Timeline({
     element.ownerDocument.addEventListener("pointerup", done);
     element.ownerDocument.addEventListener("pointercancel", done);
     return () => release(true);
-  }, [rows, prepend]);
+  }, [rows, prepend, newMessageBoundaryId]);
   useLayoutEffect(() => {
     const element = scroller.current;
     if (!element) return;
@@ -865,9 +1062,21 @@ function Timeline({
         const row = rows[index];
         if (anchor && row) {
           restoredAnchor.current = { id: row.id, y: anchor.y };
+          const message =
+            row.id === newMessageBoundaryId
+              ? scroller.current?.querySelector<HTMLElement>(
+                  `[data-message-id="${CSS.escape(row.id)}"]`,
+                )
+              : undefined;
+          const item = message?.closest("li");
+          const inset =
+            message && item
+              ? message.getBoundingClientRect().top -
+                item.getBoundingClientRect().top
+              : 0;
           handle.current.scrollToIndex(index, {
             align: "start",
-            offset: -anchor.y,
+            offset: inset - anchor.y,
           });
         } else handle.current.scrollTo(restore.offset);
         follow.current = false;
@@ -957,6 +1166,7 @@ function Timeline({
     revealedSignal,
     updateJumpToLatest,
     revealMessageId,
+    newMessageBoundaryId,
   ]);
   // After positioning reads it: a load that ends without rows lands no page.
   useLayoutEffect(() => {
@@ -1238,6 +1448,14 @@ function Timeline({
                         aria-hidden="true"
                       />
                     </Button>
+                  </div>
+                )}
+                {row.id === newMessageBoundaryId && (
+                  <div
+                    className={styles.newMessages}
+                    data-new-messages-boundary
+                  >
+                    New messages
                   </div>
                 )}
                 <ActivityExpansion
