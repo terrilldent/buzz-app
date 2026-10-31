@@ -2,6 +2,17 @@
   "id": "buzz.reviews",
   "name": "Reviews",
   "apiVersion": 1,
-  "description": "A hello-world starting point for Reviews.",
-  "discovery": { "category": "productivity" }
+  "description": "Sync outstanding GitHub review requests to a private local list.",
+  "discovery": {
+    "category": "productivity"
+  },
+  "host": {
+    "processes": [
+      {
+        "id": "graphql",
+        "program": "gh",
+        "args": ["api", "graphql", "--hostname", "github.com", "--input", "-"]
+      }
+    ]
+  }
 }

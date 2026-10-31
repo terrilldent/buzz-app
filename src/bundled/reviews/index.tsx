@@ -1,32 +1,27 @@
 import type { PluginModule } from "../../plugins/api";
-import { FullPageSurface } from "../../shared/design-system/ui/FullPageSurface";
-import {
-  PanelHeader,
-  PanelHeaderLabel,
-} from "../../shared/design-system/ui/PanelHeader";
+import { gitHubCli } from "../github/gh";
+import { ReviewsPage } from "./ReviewsPage";
+import { reviewCache } from "./storage";
+import { createReviewSync } from "./sync";
 
-export const inject = ["pages"];
+export const inject = ["pages", "host"];
 
 export const apply: PluginModule["apply"] = (ctx) => {
+  const reviews = createReviewSync(gitHubCli(ctx.host), reviewCache());
+  ctx.effect(() => {
+    void reviews.sync();
+    const timer = setInterval(() => void reviews.sync(), 5 * 60_000);
+    return () => {
+      clearInterval(timer);
+      reviews.dispose();
+    };
+  });
   ctx.pages.register({
     id: "reviews",
     title: "Reviews",
     layout: "workspace",
     primary: true,
     placement: "sidebar",
-    component: ReviewsPage,
+    component: () => <ReviewsPage reviews={reviews} />,
   });
 };
-
-function ReviewsPage() {
-  return (
-    <FullPageSurface aria-label="Reviews">
-      <div className="flex h-full min-h-0 flex-col">
-        <PanelHeader title={<PanelHeaderLabel title="Reviews" />} />
-        <div className="min-h-0 flex-1 overflow-auto p-6">
-          <p className="text-body text-standard">Hello, world!</p>
-        </div>
-      </div>
-    </FullPageSurface>
-  );
-}
